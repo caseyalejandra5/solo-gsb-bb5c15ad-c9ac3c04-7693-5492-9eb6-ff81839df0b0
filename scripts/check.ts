@@ -3,6 +3,9 @@ import { analyze } from '../src/lib/analyzer';
 import { applyStructuralChange } from '../src/lib/rewriter';
 import { scanReferences } from '../src/lib/scanner';
 import { parseOrdinal, formatChinese } from '../src/lib/numeral';
+import { diffDocuments, diffText, MAX_LCS_CHARS } from '../src/lib/diff';
+import { createSnapshot, sanitizeSnapshots } from '../src/lib/snapshot';
+import { cloneTree, renumberAll } from '../src/lib/tree';
 import { assert } from 'node:console';
 
 let pass = 0;
@@ -125,6 +128,187 @@ const amb = parseDocument(`第八条
 amb.root[1].suffix = '一';
 const ambA = analyze(amb, { confirmed: {} });
 check('同序号歧义', ambA.issues.some((i) => i.type === 'ambiguous'), JSON.stringify(ambA.issues.map(i=>i.message)));
+
+// ---- 版本对比：节点差异（新增 / 删除 / 修改 / 移动，移动且修改同时保留） ----
+{
+  const base = parseDocument(`比较法
+
+第一条【一】
+初始正文，引用第三条。
+
+第二条【二】
+第二条内容。
+
+第三条【三】
+第三条内容。`).doc;
+  renumberAll(base.root);
+  const baseA = analyze(base, { confirmed: {} });
+
+  // 修改版：第一条改正文（条头）并移动到末尾（同一节点同时移动+修改）；删除第二条；末尾新增一条
+  const root2 = cloneTree(base.root);
+  root2[0].text = '修改后的条头正文。';
+  const first = root2.shift()!; // 移除第一条
+  root2.shift(); // 移除第二条 → 余下 [第三条]
+  root2.push(first); // [第三条, 第一条]
+  root2.push({ id: 'art-new', kind: 'article', ordinal: 0, text: '', children: [
+    { id: 'par-new', kind: 'paragraph', ordinal: 1, text: '新增条内容。', children: [] },
+  ] });
+  renumberAll(root2);
+  const modified: typeof base = { ...base, root: root2, updatedAt: base.updatedAt + 1 };
+  const modA = analyze(modified, { confirmed: {} });
+
+  const d = diffDocuments(baseA, modA, base, modified);
+
+  const firstArticle = d.entries.get(base.root[0].id)!;
+  check('移动的条标记 moved', firstArticle.moved === true, JSON.stringify(firstArticle));
+  check('移动且改正文同时标记 contentModified', firstArticle.contentModified === true);
+  check('同一节点保留两类变化', firstArticle.moved && firstArticle.contentModified);
+  check('移动的款（留位同序）无差异条目', d.entries.get(base.root[0].children[0].id) === undefined);
+  const secondEntry = d.entries.get(base.root[1].id)!;
+  check('删除的条标记 removed', secondEntry.removed === true);
+  check('新增的条标记 added', d.entries.get('art-new')?.added === true);
+  check('新增条下的款也标记 added', d.entries.get('par-new')?.added === true);
+  check('计数：删除 1', d.counts.removed === 1, String(d.counts.removed));
+  check('计数：新增 2（条+款）', d.counts.added === 2, String(d.counts.added));
+  check('计数：正文修改 1', d.counts.modified === 1, String(d.counts.modified));
+  // 顺序变为 [三, 一, 新增]：条级移动 2（三、一），其余条的款随同级 ordinal 变化亦计移动
+  check('计数：位置移动 ≥ 3（含随父重排的款）', d.counts.moved >= 3, String(d.counts.moved));
+
+  // 仅移动不改正文：不应标记 contentModified
+  const root3 = cloneTree(base.root);
+  const movedFirst = root3.shift()!;
+  root3.push(movedFirst);
+  renumberAll(root3);
+  const movedDoc = { ...base, root: root3 };
+  const d3 = diffDocuments(baseA, analyze(movedDoc, { confirmed: {} }), base, movedDoc);
+  const e3 = d3.entries.get(base.root[0].id)!;
+  check('只移动未改正文：moved=true、contentModified=false', e3.moved && !e3.contentModified, JSON.stringify(e3));
+
+  // 新增条的子孙也应标记为 added
+  const withChild = cloneTree(base.root);
+  withChild.push({
+    id: 'art-c',
+    kind: 'article',
+    ordinal: 0,
+    text: '',
+    children: [
+      { id: 'par-c', kind: 'paragraph', ordinal: 1, text: '新款', children: [
+        { id: 'itm-c', kind: 'item', ordinal: 1, text: '新项', children: [] },
+      ] },
+    ],
+  });
+  renumberAll(withChild);
+  const docChild = { ...base, root: withChild };
+  const dChild = diffDocuments(baseA, analyze(docChild, { confirmed: {} }), base, docChild);
+  check('新增条下的款也标记 added', dChild.entries.get('par-c')?.added === true);
+  check('新增条下的项也标记 added', dChild.entries.get('itm-c')?.added === true);
+}
+
+// ---- 版本对比：引用差异按 源节点ID+原文+同文序次 对齐 ----
+{
+  const refDoc = parseDocument(`引用法
+
+第一条
+见第三条。
+
+第二条
+保留。
+
+第三条
+被引用的条。`).doc;
+  renumberAll(refDoc.root);
+  const refA = analyze(refDoc, { confirmed: {} });
+  const firstParaId = refDoc.root[0].children[0].id;
+
+  // 把第三条移到最前且不原子改写文本：原“第三条”（原文不变）解析到不同稳定节点 → 目标变化
+  const rootB = cloneTree(refDoc.root);
+  const third = rootB.splice(2, 1)[0];
+  rootB.unshift(third); // [三, 一, 二]
+  renumberAll(rootB);
+  const docB = { ...refDoc, root: rootB };
+  const aB = analyze(docB, { confirmed: {} });
+  const d = diffDocuments(refA, aB, refDoc, docB);
+  check(
+    '原文不变但解析目标改变 → 目标变化 1 条',
+    d.refRetargeted.length === 1 && d.refRetargeted[0].raw === '第三条',
+    JSON.stringify(d.refRetargeted.map((r) => [r.raw, r.oldTargetId, r.newTargetId])),
+  );
+  check('目标变化项记录源节点稳定 ID', d.refRetargeted[0].nodeId === firstParaId);
+
+  // 直接改正文：把引用改成“第二条”
+  const rootC = cloneTree(refDoc.root);
+  rootC[0].children[0].text = '见第二条。';
+  const docC = { ...refDoc, root: rootC };
+  const dC = diffDocuments(refA, analyze(docC, { confirmed: {} }), refDoc, docC);
+  check('引用移除 1（第三条）', dC.refRemoved.length === 1 && dC.refRemoved[0].raw === '第三条', JSON.stringify(dC.refRemoved.map((r) => r.raw)));
+  check('引用新增 1（第二条）', dC.refAdded.length === 1 && dC.refAdded[0].raw === '第二条', JSON.stringify(dC.refAdded.map((r) => r.raw)));
+
+  // 同文序次：同节点两条相同原文，删去第二次出现应只标记第二次移除
+  const dupDoc = parseDocument(`重复法
+
+第一条
+两次引用：见第三条；再次见第三条。
+
+第二条
+中间条。
+
+第三条
+目标条。`).doc;
+  renumberAll(dupDoc.root);
+  const dupA = analyze(dupDoc, { confirmed: {} });
+  const rootD = cloneTree(dupDoc.root);
+  rootD[0].children[0].text = '两次引用：见第三条。';
+  const dupDoc2 = { ...dupDoc, root: rootD };
+  const dD = diffDocuments(dupA, analyze(dupDoc2, { confirmed: {} }), dupDoc, dupDoc2);
+  check('同文序次对齐：移除第二次出现', dD.refRemoved.length === 1 && dD.refRemoved[0].occurrenceIndex === 2, String(dD.refRemoved[0]?.occurrenceIndex));
+  check('同文序次对齐：第一次出现保留（非新增）', dD.refAdded.length === 0, String(dD.refAdded.length));
+}
+
+// ---- 快照：只读、旧数据缺省为空列表 ----
+{
+  const s = parseDocument(`快照法
+
+第一条
+内容。`).doc;
+  renumberAll(s.root);
+  const snap = createSnapshot(s, {}, '一审稿');
+  check('快照名称保留', snap.name === '一审稿');
+  check('快照与正文脱离引用（深拷贝）', snap.doc.root[0] !== s.root[0]);
+  let froze = false;
+  try {
+    'use strict';
+    (snap as unknown as { name: string }).name = 'x';
+    froze = snap.name === '一审稿';
+  } catch {
+    froze = true;
+  }
+  check('快照只读（冻结）', froze);
+  check('旧数据缺少 snapshots → 空列表', sanitizeSnapshots(undefined).length === 0);
+  check('非法快照项被过滤', sanitizeSnapshots([{ name: 'x' }, null, 42]).length === 0);
+  check(
+    '合法快照项保留',
+    sanitizeSnapshots([{ id: 'q', name: 'q', createdAt: 1, doc: s, confirmed: {} }]).length === 1,
+  );
+}
+
+// ---- 正文逐字差异 ----
+{
+  const segs = diffText('适用第三条规定', '适用第五条规定');
+  const rebuilt = segs
+    .filter((s) => s.type !== 'del')
+    .map((s) => s.text)
+    .join('');
+  const added = segs.filter((s) => s.type === 'add').map((s) => s.text).join('');
+  const removed = segs.filter((s) => s.type === 'del').map((s) => s.text).join('');
+  check('逐字差异拼回新文本（same+add）', rebuilt === '适用第五条规定', rebuilt);
+  check('逐字差异：删除“三”', removed === '三', removed);
+  check('逐字差异：新增“五”', added === '五', added);
+  check('相同文本只有 same', diffText('abc', 'abc').length === 1 && diffText('abc', 'abc')[0].type === 'same');
+  // 长文本退化策略不抛错
+  const long = '字'.repeat(MAX_LCS_CHARS + 10);
+  const segsLong = diffText(long, long + '尾');
+  check('超长文本退化为整段差异', segsLong.some((s) => s.type === 'add'));
+}
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../lib/context';
 
-export function Toolbar({ onOpenImport }: { onOpenImport: () => void }) {
+export function Toolbar({
+  view,
+  onSwitchView,
+  onOpenImport,
+}: {
+  view: 'edit' | 'compare';
+  onSwitchView: (view: 'edit' | 'compare') => void;
+  onOpenImport: () => void;
+}) {
   const { store } = useApp();
   const snap = store.getSnapshot?.() ?? null;
   const [, force] = useState(0);
@@ -13,6 +21,7 @@ export function Toolbar({ onOpenImport }: { onOpenImport: () => void }) {
   const canUndo = snap?.canUndo ?? false;
   const canRedo = snap?.canRedo ?? false;
   const issueCount = snap?.analysis.issues.length ?? 0;
+  const snapshotCount = snap?.snapshots.length ?? 0;
 
   const doExport = () => {
     const blob = new Blob([JSON.stringify(store.exportJson(), null, 2)], {
@@ -34,17 +43,36 @@ export function Toolbar({ onOpenImport }: { onOpenImport: () => void }) {
         <strong>条款引用校验台</strong>
       </div>
 
+      <div className="tool-group view-switch" role="tablist" aria-label="视图切换">
+        <button
+          role="tab"
+          aria-selected={view === 'edit'}
+          className={view === 'edit' ? 'active' : ''}
+          onClick={() => onSwitchView('edit')}
+        >
+          正文编辑
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === 'compare'}
+          className={view === 'compare' ? 'active' : ''}
+          onClick={() => onSwitchView('compare')}
+        >
+          版本对比{snapshotCount > 0 ? `（${snapshotCount}）` : ''}
+        </button>
+      </div>
+
       <div className="tool-group">
         <button
           title="撤销 (Ctrl+Z)"
-          disabled={!canUndo}
+          disabled={!canUndo || view !== 'edit'}
           onClick={() => store.undo()}
         >
           ↶ 撤销
         </button>
         <button
           title="重做 (Ctrl+Y)"
-          disabled={!canRedo}
+          disabled={!canRedo || view !== 'edit'}
           onClick={() => store.redo()}
         >
           ↷ 重做

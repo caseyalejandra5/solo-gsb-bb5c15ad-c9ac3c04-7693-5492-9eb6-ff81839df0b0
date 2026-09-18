@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import type {
   ClauseDocument,
   ClauseNode,
+  DocSnapshot,
   ExportBundle,
   PersistedState,
 } from '../../shared/model';
@@ -21,11 +22,19 @@ import {
 
 import { applyStructuralChange } from './rewriter';
 import { localStore, serverStore } from './storage';
+import { createSnapshot, sanitizeSnapshots } from './snapshot';
 import { uid } from './uid';
+
+/** 撤销/重做历史只承载正文与确认记录；快照独立于历史，不参与撤销 */
+interface DocState {
+  doc: ClauseDocument;
+  confirmed: Record<string, string>;
+}
 
 interface Snapshot {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
+  snapshots: DocSnapshot[];
   analysis: Analysis;
   canUndo: boolean;
   canRedo: boolean;
@@ -34,18 +43,20 @@ interface Snapshot {
 const MAX_HISTORY = 100;
 
 export class AppStore {
-  private past: PersistedState[] = [];
-  private future: PersistedState[] = [];
-  private state: PersistedState;
+  private past: DocState[] = [];
+  private future: DocState[] = [];
+  private docState: DocState;
+  private snapshots: DocSnapshot[] = [];
   private analysis: Analysis;
   /** 当前连续文本编辑突发的起始状态（用于合并撤销） */
-  private coalesceBaseline: PersistedState | null = null;
+  private coalesceBaseline: DocState | null = null;
   private listeners = new Set<() => void>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   lastRewriteInfo: { rewritten: number; skipped: number } | null = null;
 
   constructor(initial: PersistedState) {
-    this.state = initial;
+    this.snapshots = sanitizeSnapshots(initial.snapshots);
+    this.docState = { doc: initial.doc, confirmed: initial.confirmed };
     this.analysis = analyze(initial.doc, { confirmed: initial.confirmed });
   }
 
@@ -59,15 +70,21 @@ export class AppStore {
   }
 
   getSnapshot = (): Snapshot => ({
-    doc: this.state.doc,
-    confirmed: this.state.confirmed,
+    doc: this.docState.doc,
+    confirmed: this.docState.confirmed,
+    snapshots: this.snapshots,
     analysis: this.analysis,
     canUndo: this.past.length > 0,
     canRedo: this.future.length > 0,
   });
 
+  /** 当前完整持久化状态（正文 + 确认 + 快照） */
+  private currentPersisted(): PersistedState {
+    return { ...this.docState, snapshots: this.snapshots };
+  }
+
   /** 提交新状态：重新分析、裁剪过期确认、压入历史、持久化 */
-  private commit(next: PersistedState, options: { coalesce?: boolean } = {}): void {
+  private commit(next: DocState, options: { coalesce?: boolean } = {}): void {
     const analysis = analyze(next.doc, { confirmed: next.confirmed });
     // 裁剪：确认记录必须仍对应一个“歧义已消失/仍歧义”的 occurrence，且目标存在
     const valid = new Set(
@@ -79,33 +96,33 @@ export class AppStore {
     for (const [sig, target] of Object.entries(next.confirmed)) {
       if (valid.has(sig) && analysis.nodes[target]) confirmed[sig] = target;
     }
-    next = { ...next, confirmed, doc: touch(next.doc) };
+    next = { confirmed, doc: touch(next.doc) };
 
     if (options.coalesce) {
       if (this.coalesceBaseline) {
         // 同一编辑突发内：不压栈，栈顶保持为突发前基线
       } else {
-        this.coalesceBaseline = this.state;
-        this.past.push(this.state);
+        this.coalesceBaseline = this.docState;
+        this.past.push(this.docState);
       }
     } else {
       this.coalesceBaseline = null;
       this.editCoalesceUntil = 0;
-      this.past.push(this.state);
+      this.past.push(this.docState);
       if (this.past.length > MAX_HISTORY) this.past.shift();
     }
     this.future = [];
-    this.state = next;
+    this.docState = next;
     this.analysis = analysis;
     this.scheduleSave();
     this.emit();
   }
 
   private scheduleSave(): void {
-    localStore.save(this.state);
+    localStore.save(this.currentPersisted());
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      void serverStore.save(this.state);
+      void serverStore.save(this.currentPersisted());
     }, 600);
   }
 
@@ -114,8 +131,8 @@ export class AppStore {
   undo(): void {
     const prev = this.past.pop();
     if (!prev) return;
-    this.future.push(this.state);
-    this.state = prev;
+    this.future.push(this.docState);
+    this.docState = prev;
     this.analysis = analyze(prev.doc, { confirmed: prev.confirmed });
     this.coalesceBaseline = null;
     this.editCoalesceUntil = 0;
@@ -126,8 +143,8 @@ export class AppStore {
   redo(): void {
     const next = this.future.pop();
     if (!next) return;
-    this.past.push(this.state);
-    this.state = next;
+    this.past.push(this.docState);
+    this.docState = next;
     this.analysis = analyze(next.doc, { confirmed: next.confirmed });
     this.coalesceBaseline = null;
     this.editCoalesceUntil = 0;
@@ -140,39 +157,39 @@ export class AppStore {
   private editCoalesceUntil = 0;
 
   updateNodeText(nodeId: string, text: string): void {
-    const root = cloneTree(this.state.doc.root);
+    const root = cloneTree(this.docState.doc.root);
     const found = findNode(root, nodeId);
     if (!found) return;
     found.node.text = text;
     const now = Date.now();
     const coalesce = now < this.editCoalesceUntil;
     this.editCoalesceUntil = now + 800;
-    this.commit({ ...this.state, doc: { ...this.state.doc, root } }, { coalesce });
+    this.commit({ ...this.docState, doc: { ...this.docState.doc, root } }, { coalesce });
   }
 
   updateArticleMeta(articleId: string, patch: { title?: string; suffix?: string }): void {
-    const root = cloneTree(this.state.doc.root);
+    const root = cloneTree(this.docState.doc.root);
     const found = findNode(root, articleId);
     if (!found || found.node.kind !== 'article') return;
     if ('title' in patch) found.node.title = patch.title?.trim() || undefined;
     if ('suffix' in patch) found.node.suffix = patch.suffix?.trim() || undefined;
-    this.commit({ ...this.state, doc: { ...this.state.doc, root } });
+    this.commit({ ...this.docState, doc: { ...this.docState.doc, root } });
   }
 
   renameTitle(title: string): void {
-    this.commit({ ...this.state, doc: { ...this.state.doc, title } }, { coalesce: false });
+    this.commit({ ...this.docState, doc: { ...this.docState.doc, title } }, { coalesce: false });
   }
 
   // ---------- 结构操作（触发原子引用改写） ----------
 
   private structural(label: string, mutator: (root: ClauseNode[]) => void): void {
     void label;
-    const result = applyStructuralChange(this.state.doc, this.analysis, mutator);
+    const result = applyStructuralChange(this.docState.doc, this.analysis, mutator);
     this.lastRewriteInfo = {
       rewritten: result.rewritten,
       skipped: result.skipped.length,
     };
-    this.commit({ ...this.state, doc: result.doc });
+    this.commit({ ...this.docState, doc: result.doc });
   }
 
   /** 同级内移动（拖拽排序）。toIndex 为删除源节点后的目标下标 */
@@ -262,7 +279,9 @@ export class AppStore {
   // ---------- 粘贴导入 / JSON 导入导出 ----------
 
   importPastedText(raw: string): void {
-    const { doc } = parseDocument(raw, this.state.doc.title);
+    const { doc } = parseDocument(raw, this.docState.doc.title);
+    // 粘贴替换正文是全新文档，旧快照不再有对齐意义
+    this.snapshots = [];
     this.commit({ doc, confirmed: {} });
   }
 
@@ -275,6 +294,8 @@ export class AppStore {
       updatedAt: Date.now(),
     };
     const confirmed = bundle.confirmed ?? {};
+    // 快照随 JSON 导入；旧文件缺少 snapshots 时按空列表加载
+    this.snapshots = sanitizeSnapshots(bundle.snapshots);
     renumberAll(doc.root);
     this.commit({ doc: touch(doc), confirmed });
   }
@@ -283,29 +304,55 @@ export class AppStore {
     return {
       app: 'clause-reference-validator',
       version: 1,
-      document: this.state.doc,
-      confirmed: this.state.confirmed,
+      document: this.docState.doc,
+      confirmed: this.docState.confirmed,
+      snapshots: this.snapshots,
       exportedAt: new Date().toISOString(),
     };
   }
 
   replaceWithSample(doc: ClauseDocument): void {
+    this.snapshots = [];
     this.commit({ doc, confirmed: {} });
+  }
+
+  // ---------- 版本快照（只读；创建/删除不进入正文撤销历史） ----------
+
+  /** 保存当前文档为命名快照，返回新快照 id */
+  saveSnapshot(name: string): string {
+    const trimmed = name.trim();
+    const snapshot = createSnapshot(
+      this.docState.doc,
+      this.docState.confirmed,
+      trimmed || defaultSnapshotName(this.snapshots.length),
+    );
+    this.snapshots = [...this.snapshots, snapshot];
+    this.scheduleSave();
+    this.emit();
+    return snapshot.id;
+  }
+
+  /** 删除快照：不影响正文、确认记录与撤销历史 */
+  deleteSnapshot(snapshotId: string): void {
+    if (!this.snapshots.some((s) => s.id === snapshotId)) return;
+    this.snapshots = this.snapshots.filter((s) => s.id !== snapshotId);
+    this.scheduleSave();
+    this.emit();
   }
 
   // ---------- 歧义确认 ----------
 
   confirmAmbiguous(signature: string, targetId: string): void {
     this.commit({
-      ...this.state,
-      confirmed: { ...this.state.confirmed, [signature]: targetId },
+      ...this.docState,
+      confirmed: { ...this.docState.confirmed, [signature]: targetId },
     });
   }
 
   clearConfirmation(signature: string): void {
-    const confirmed = { ...this.state.confirmed };
+    const confirmed = { ...this.docState.confirmed };
     delete confirmed[signature];
-    this.commit({ ...this.state, confirmed });
+    this.commit({ ...this.docState, confirmed });
   }
 
   // ---------- 派生查询 ----------
@@ -316,8 +363,15 @@ export class AppStore {
   }
 
   articleOf(nodeId: string): ClauseNode | null {
-    return findArticleOf(this.state.doc.root, nodeId);
+    return findArticleOf(this.docState.doc.root, nodeId);
   }
+}
+
+function defaultSnapshotName(existing: number): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `快照 ${existing + 1}（${stamp}）`;
 }
 
 import.meta.hot?.accept();
