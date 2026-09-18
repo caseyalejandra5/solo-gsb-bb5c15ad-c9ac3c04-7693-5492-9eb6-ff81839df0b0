@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import type {
   ClauseDocument,
   ClauseNode,
+  DocSnapshot,
   ExportBundle,
   PersistedState,
 } from '../../shared/model';
@@ -26,6 +27,7 @@ import { uid } from './uid';
 interface Snapshot {
   doc: ClauseDocument;
   confirmed: Record<string, string>;
+  snapshots: DocSnapshot[];
   analysis: Analysis;
   canUndo: boolean;
   canRedo: boolean;
@@ -33,10 +35,31 @@ interface Snapshot {
 
 const MAX_HISTORY = 100;
 
+/** 校验并规范化来自 JSON / 持久化数据的快照列表；非法条目丢弃 */
+function sanitizeSnapshots(raw: unknown): DocSnapshot[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DocSnapshot[] = [];
+  for (const s of raw as DocSnapshot[]) {
+    if (!s || typeof s !== 'object') continue;
+    const doc = s.doc;
+    if (!doc || !Array.isArray(doc.root)) continue;
+    out.push({
+      id: typeof s.id === 'string' && s.id ? s.id : uid('snap'),
+      name: typeof s.name === 'string' && s.name.trim() ? s.name.trim() : '未命名快照',
+      createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+      doc,
+      confirmed: s.confirmed && typeof s.confirmed === 'object' ? s.confirmed : {},
+    });
+  }
+  return out;
+}
+
 export class AppStore {
   private past: PersistedState[] = [];
   private future: PersistedState[] = [];
   private state: PersistedState;
+  /** 命名快照：只读，独立于撤销历史（past/future 不含快照） */
+  private snapshots: DocSnapshot[];
   private analysis: Analysis;
   /** 当前连续文本编辑突发的起始状态（用于合并撤销） */
   private coalesceBaseline: PersistedState | null = null;
@@ -45,7 +68,9 @@ export class AppStore {
   lastRewriteInfo: { rewritten: number; skipped: number } | null = null;
 
   constructor(initial: PersistedState) {
-    this.state = initial;
+    this.state = { doc: initial.doc, confirmed: initial.confirmed };
+    // 旧数据缺少 snapshots 字段时按空列表加载
+    this.snapshots = sanitizeSnapshots(initial.snapshots);
     this.analysis = analyze(initial.doc, { confirmed: initial.confirmed });
   }
 
@@ -61,6 +86,7 @@ export class AppStore {
   getSnapshot = (): Snapshot => ({
     doc: this.state.doc,
     confirmed: this.state.confirmed,
+    snapshots: this.snapshots,
     analysis: this.analysis,
     canUndo: this.past.length > 0,
     canRedo: this.future.length > 0,
@@ -101,12 +127,43 @@ export class AppStore {
     this.emit();
   }
 
+  /** 组合当前文档状态与快照列表，用于持久化 */
+  private persistedState(): PersistedState {
+    return { ...this.state, snapshots: this.snapshots };
+  }
+
   private scheduleSave(): void {
-    localStore.save(this.state);
+    localStore.save(this.persistedState());
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      void serverStore.save(this.state);
+      void serverStore.save(this.persistedState());
     }, 600);
+  }
+
+  // ---------- 命名快照（只读；不影响正文与撤销历史） ----------
+
+  /** 把当前文档保存为命名快照（深拷贝冻结，之后编辑不会影响快照内容） */
+  saveSnapshot(name: string): DocSnapshot {
+    const snapshot: DocSnapshot = {
+      id: uid('snap'),
+      name: name.trim() || `快照 ${this.snapshots.length + 1}`,
+      createdAt: Date.now(),
+      doc: { ...this.state.doc, root: cloneTree(this.state.doc.root) },
+      confirmed: { ...this.state.confirmed },
+    };
+    this.snapshots = [...this.snapshots, snapshot];
+    this.scheduleSave();
+    this.emit();
+    return snapshot;
+  }
+
+  /** 删除快照：仅移除快照本身，正文、确认记录与撤销历史保持不变 */
+  deleteSnapshot(id: string): void {
+    const next = this.snapshots.filter((s) => s.id !== id);
+    if (next.length === this.snapshots.length) return;
+    this.snapshots = next;
+    this.scheduleSave();
+    this.emit();
   }
 
   // ---------- 历史 ----------
@@ -275,6 +332,8 @@ export class AppStore {
       updatedAt: Date.now(),
     };
     const confirmed = bundle.confirmed ?? {};
+    // 快照随 JSON 导入；旧文件缺少 snapshots 时按空列表加载
+    this.snapshots = sanitizeSnapshots(bundle.snapshots);
     renumberAll(doc.root);
     this.commit({ doc: touch(doc), confirmed });
   }
@@ -285,6 +344,7 @@ export class AppStore {
       version: 1,
       document: this.state.doc,
       confirmed: this.state.confirmed,
+      snapshots: this.snapshots,
       exportedAt: new Date().toISOString(),
     };
   }

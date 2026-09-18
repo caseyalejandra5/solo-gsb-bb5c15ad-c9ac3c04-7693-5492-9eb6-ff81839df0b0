@@ -3,6 +3,10 @@ import { analyze } from '../src/lib/analyzer';
 import { applyStructuralChange } from '../src/lib/rewriter';
 import { scanReferences } from '../src/lib/scanner';
 import { parseOrdinal, formatChinese } from '../src/lib/numeral';
+import { diffSnapshots } from '../src/lib/diff';
+import { cloneTree, newArticle, renumberAll } from '../src/lib/tree';
+import { AppStore } from '../src/lib/store';
+import type { DocSnapshot } from '../shared/model';
 import { assert } from 'node:console';
 
 let pass = 0;
@@ -125,6 +129,150 @@ const amb = parseDocument(`第八条
 amb.root[1].suffix = '一';
 const ambA = analyze(amb, { confirmed: {} });
 check('同序号歧义', ambA.issues.some((i) => i.type === 'ambiguous'), JSON.stringify(ambA.issues.map(i=>i.message)));
+
+// ---- 版本对比：快照 diff（稳定节点 ID 对齐） ----
+const diffBase = parseDocument(`对比办法
+
+第一条【目的】
+为了测试，适用第二条的规定。
+
+第二条【范围】
+本法适用于测试场景。
+引用第三条规定处理。
+
+第三条【程序】
+程序内容一。
+程序内容二，参见第一条。`).doc;
+const snapA: DocSnapshot = { id: 'sa', name: 'A', createdAt: 1, doc: diffBase, confirmed: {} };
+
+// 版本 B：第三条移到第二位并修改其正文；删除原第二条第二款；末尾新增一条
+const rootB = cloneTree(diffBase.root);
+const [movedArt] = rootB.splice(2, 1);
+rootB.splice(1, 0, movedArt);
+movedArt.text = '本条已整体修订。';
+const removedPar = rootB[2].children[1];
+rootB[2].children.splice(1, 1);
+const addedArt = newArticle('新增条款，引用第一条。');
+rootB.push(addedArt);
+renumberAll(rootB);
+const snapB: DocSnapshot = {
+  id: 'sb',
+  name: 'B',
+  createdAt: 2,
+  doc: { ...diffBase, root: rootB },
+  confirmed: {},
+};
+const vd = diffSnapshots(snapA, snapB);
+
+const movedChange = vd.nodeChanges.find((c) => c.nodeId === movedArt.id);
+check(
+  '移动且修改的节点同时保留两类变化',
+  Boolean(
+    movedChange &&
+      movedChange.changes.includes('moved') &&
+      movedChange.changes.includes('modified'),
+  ),
+  JSON.stringify(movedChange?.changes),
+);
+check(
+  '删除的款被标出',
+  vd.nodeChanges.some((c) => c.nodeId === removedPar.id && c.changes.includes('removed')),
+);
+check(
+  '新增的条被标出',
+  vd.nodeChanges.some((c) => c.nodeId === addedArt.id && c.changes.includes('added')),
+);
+check(
+  '位置移动被标出（原第二条后移一位）',
+  vd.nodeChanges.some((c) => c.nodeId === diffBase.root[1].id && c.changes.includes('moved')),
+);
+check(
+  '未变化的节点不产生差异',
+  !vd.nodeChanges.some((c) => c.nodeId === diffBase.root[0].id),
+);
+check(
+  '引用目标变化（“第二条”因换位指向新节点）',
+  vd.refChanges.some(
+    (c) =>
+      c.change === 'target-changed' &&
+      c.raw === '第二条' &&
+      c.beforeTargetId === diffBase.root[1].id &&
+      c.afterTargetId === movedArt.id,
+  ),
+  JSON.stringify(vd.refChanges),
+);
+check(
+  '引用移除（源节点随款删除）',
+  vd.refChanges.some(
+    (c) => c.change === 'removed' && c.raw === '第三条' && c.sourceNodeId === removedPar.id,
+  ),
+);
+check(
+  '引用新增（新条款中的引用）',
+  vd.refChanges.some(
+    (c) => c.change === 'added' && c.raw === '第一条' && c.sourceNodeId === addedArt.id,
+  ),
+);
+check(
+  '未变化的引用不产生差异',
+  !vd.refChanges.some((c) => c.sourceNodeId === movedArt.children[1].id),
+);
+
+// ---- 快照存储行为：只读、独立于撤销历史、随 JSON 导入导出 ----
+const storeDoc = parseDocument(`快照办法
+
+第一条
+内容一，引用第二条。
+
+第二条
+内容二。`).doc;
+const st = new AppStore({ doc: storeDoc, confirmed: {} });
+st.saveSnapshot('v1');
+check('保存快照不产生撤销历史', st.getSnapshot().canUndo === false);
+check('快照列表有一条', st.getSnapshot().snapshots.length === 1);
+
+const parId = storeDoc.root[0].children[0].id;
+st.updateNodeText(parId, '内容一（已修改），引用第二条。');
+check('正文编辑进入撤销历史', st.getSnapshot().canUndo === true);
+check(
+  '快照只读：正文修改后快照内容不变',
+  st.getSnapshot().snapshots[0].doc.root[0].children[0].text === '内容一，引用第二条。',
+);
+
+const docBeforeDelete = st.getSnapshot().doc;
+st.deleteSnapshot(st.getSnapshot().snapshots[0].id);
+check('删除快照后列表为空', st.getSnapshot().snapshots.length === 0);
+check('删除快照不影响正文', st.getSnapshot().doc === docBeforeDelete);
+check('删除快照不影响撤销历史', st.getSnapshot().canUndo === true);
+st.undo();
+check(
+  '删除快照后撤销仍正常工作',
+  st.getSnapshot().doc.root[0].children[0].text === '内容一，引用第二条。',
+);
+
+// 导出包含快照；导入旧数据（无 snapshots 字段）按空列表加载
+st.saveSnapshot('基线');
+const bundle = st.exportJson();
+check(
+  '导出 JSON 包含快照',
+  Array.isArray(bundle.snapshots) && bundle.snapshots.length === 1,
+);
+const st2 = new AppStore({ doc: storeDoc, confirmed: {} });
+st2.saveSnapshot('将被覆盖');
+st2.importJson({
+  app: 'clause-reference-validator',
+  version: 1,
+  document: storeDoc,
+  confirmed: {},
+  exportedAt: new Date().toISOString(),
+});
+check('旧数据缺少 snapshots 时按空列表加载', st2.getSnapshot().snapshots.length === 0);
+st2.importJson(bundle);
+check(
+  '导入 JSON 恢复快照',
+  st2.getSnapshot().snapshots.length === 1 &&
+    st2.getSnapshot().snapshots[0].name === '基线',
+);
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

@@ -496,3 +496,139 @@ button.small { padding: 1px 6px; font-size: 11px; }
   border-color: var(--warn);
 }
 .candidate-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+
+/* ---------- 版本对比 ---------- */
+.toolbar button.active-toggle {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(56, 189, 248, 0.1);
+}
+.compare-main {
+  display: block;
+}
+.pane-compare {
+  padding: 16px 22px 40px;
+  overflow: auto;
+}
+.compare-view {
+  width: min(980px, 100%);
+  margin: 0 auto;
+}
+.compare-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+}
+.compare-head h2 { margin: 0; font-size: 18px; }
+.compare-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.compare-section h3 { margin: 0 0 10px; font-size: 14.5px; }
+.compare-section h4 { margin: 16px 0 8px; font-size: 13px; color: var(--text-dim); }
+.compare-hint { font-size: 12px; color: var(--text-dim); line-height: 1.7; margin: 8px 0; }
+
+.snapshot-save-row { display: flex; gap: 8px; }
+.snapshot-name-input {
+  flex: 1;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+.snapshot-name-input:focus { border-color: var(--accent); outline: none; }
+
+.snapshot-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.snapshot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+.snapshot-row.selected { border-color: rgba(56, 189, 248, 0.55); }
+.snapshot-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.snapshot-meta { font-size: 11.5px; color: var(--text-dim); }
+
+.compare-selectors {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.compare-selectors label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 220px;
+}
+.compare-selectors select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+.compare-arrow { color: var(--accent); font-size: 18px; align-self: flex-end; padding-bottom: 6px; }
+
+.diff-result { margin-top: 14px; }
+.diff-summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.diff-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.diff-chip.dc-added { color: var(--ok); background: rgba(52, 211, 153, 0.12); border-color: rgba(52, 211, 153, 0.4); }
+.diff-chip.dc-removed { color: var(--danger); background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.4); }
+.diff-chip.dc-modified { color: var(--warn); background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.4); }
+.diff-chip.dc-moved { color: var(--cycle); background: rgba(192, 132, 252, 0.12); border-color: rgba(192, 132, 252, 0.4); }
+.diff-chip.dc-ref { color: var(--amb); background: rgba(96, 165, 250, 0.12); border-color: rgba(96, 165, 250, 0.4); }
+
+.diff-list { list-style: none; margin: 0; padding: 0; }
+.diff-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+.diff-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.diff-badges { display: inline-flex; gap: 4px; }
+.diff-label { color: var(--text); font-weight: 600; }
+.diff-actions { margin-left: auto; }
+.diff-gone { color: var(--text-dim); font-size: 11.5px; }
+.diff-texts { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.diff-text {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.07);
+  border-left: 2px solid var(--border);
+  word-break: break-all;
+}
+.diff-text.before { border-left-color: var(--danger); }
+.diff-text.after { border-left-color: var(--ok); }

@@ -135,11 +135,22 @@ export interface ArticleEdge {
   refKey: string;
 }
 
+/** 命名快照：某一时刻文档与确认记录的只读副本（不参与撤销历史） */
+export interface DocSnapshot {
+  id: string;
+  name: string;
+  createdAt: number;
+  doc: ClauseDocument;
+  confirmed: Record<string, string>;
+}
+
 /** 持久化状态（同时用于本地文件与浏览器缓存） */
 export interface PersistedState {
   doc: ClauseDocument;
   /** 歧义引用确认：signature -> targetId */
   confirmed: Record<string, string>;
+  /** 命名快照列表；旧数据缺少该字段时按空列表加载 */
+  snapshots?: DocSnapshot[];
 }
 
 export interface ExportBundle {
@@ -147,5 +158,7 @@ export interface ExportBundle {
   version: 1;
   document: ClauseDocument;
   confirmed: Record<string, string>;
+  /** 命名快照随文档一同导出；旧导出文件可没有该字段 */
+  snapshots?: DocSnapshot[];
   exportedAt: string;
 }

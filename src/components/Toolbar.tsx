@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../lib/context';
 
-export function Toolbar({ onOpenImport }: { onOpenImport: () => void }) {
+export function Toolbar({
+  onOpenImport,
+  onToggleCompare,
+  compareActive,
+}: {
+  onOpenImport: () => void;
+  onToggleCompare: () => void;
+  compareActive: boolean;
+}) {
   const { store } = useApp();
   const snap = store.getSnapshot?.() ?? null;
   const [, force] = useState(0);
@@ -54,6 +62,13 @@ export function Toolbar({ onOpenImport }: { onOpenImport: () => void }) {
       <div className="tool-group">
         <button onClick={onOpenImport}>粘贴 / 导入</button>
         <button onClick={doExport}>导出 JSON</button>
+        <button
+          className={compareActive ? 'active-toggle' : ''}
+          title="保存命名快照并对比任意两个版本"
+          onClick={onToggleCompare}
+        >
+          {compareActive ? '返回编辑' : '版本对比'}
+        </button>
       </div>
 
       <div className="tool-spacer" />
